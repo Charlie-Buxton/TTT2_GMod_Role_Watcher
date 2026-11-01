@@ -1,0 +1,6 @@
+{
+  "title": "TTT2 Role Watcher",
+  "type": "gamemode",
+  "tags": ["roleplay", "fun"],
+  "ignore": ["tests/*", "README.md"]
+}
