@@ -4,7 +4,7 @@ end
 
 WATCHER_ROLE = WATCHER_ROLE or {}
 WATCHER_ROLE.STARE_CLASS = "weapon_ttt2_watcher_stare"
-WATCHER_ROLE.STARE_TIME = 2 / 1.5
+WATCHER_ROLE.STARE_TIME = 2
 WATCHER_ROLE.DRAIN_TIME = 6
 WATCHER_ROLE.AIM_TOLERANCE = 0.2 -- Degrees beyond the player's bounding box.
 
@@ -150,6 +150,15 @@ if SERVER then
     end
   end)
 
+  hook.Add("StartCommand", "ttt2_watcher_held_attack", function(ply, cmd)
+    local state = states[ply]
+    if not state then return end
+
+    -- Read the held button before weapon processing can consume attack input.
+    -- Losing a target never changes this; only the next command's button does.
+    state.attackHeld = cmd:KeyDown(IN_ATTACK)
+  end)
+
   local function canSeeTarget(ply, target, origin, point)
     local trace = util.TraceLine({
       start = origin,
@@ -161,9 +170,9 @@ if SERVER then
     return not trace.Hit or trace.Entity == target
   end
 
-  local function getStareTarget(ply)
+  local function getStareTarget(ply, attackHeld)
     local active = ply:GetActiveWeapon()
-    if not IsValid(active) or active:GetClass() ~= STARE_CLASS or not ply:KeyDown(IN_ATTACK) then return end
+    if not IsValid(active) or active:GetClass() ~= STARE_CLASS or not attackHeld then return end
 
     local origin = ply:GetShootPos()
     local aim = ply:GetAimVector()
@@ -229,7 +238,7 @@ if SERVER then
           state.progress = 0
         end
 
-        local target = getStareTarget(ply)
+        local target = getStareTarget(ply, state.attackHeld)
 
         if target and target ~= state.tracked then
           -- Progress belongs to one player; it cannot be carried to another.
@@ -267,7 +276,7 @@ if SERVER then
     WATCHER_ROLE.ClearState(ply)
     if not WATCHER_ROLE.IsActiveWatcher(ply) then return end
 
-    states[ply] = {progress = 0, lastUpdate = CurTime(), nextSend = 0}
+    states[ply] = {progress = 0, lastUpdate = CurTime(), nextSend = 0, attackHeld = false}
     WATCHER_ROLE.QueueLoadout(ply)
   end
 
@@ -335,7 +344,7 @@ if CLIENT then
   local tracked, focus
   local progress, displayedProgress = 0, 0
   local OUTLINE_COLOR = Color(255, 0, 0, 255)
-  local BAR_COLOR = Color(95, 175, 160, 255)
+  local BAR_COLOR = Color(95, 180, 140, 255)
   local BACKGROUND_COLOR = Color(15, 18, 22, 220)
   local TEXT_COLOR = Color(255, 255, 255, 255)
 
@@ -379,7 +388,8 @@ if CLIENT then
     local left = centerX - width * 0.5
     draw.RoundedBox(4, left - 2, top - 2, width + 4, height + 4, BACKGROUND_COLOR)
     draw.RoundedBox(3, left, top, width * displayedProgress, height, BAR_COLOR)
-    local label = LANG.GetTranslation("watcher_stare_progress") .. " " .. math.floor(progress * 100) .. "%"
+    local label = LANG.GetTranslation("watcher_stare_progress") .. " " .. focus:Nick()
+      .. " " .. math.floor(progress * 100) .. "%"
     top = top + height + 10
 
     draw.SimpleTextOutlined(label, "Trebuchet18", centerX, top, TEXT_COLOR,

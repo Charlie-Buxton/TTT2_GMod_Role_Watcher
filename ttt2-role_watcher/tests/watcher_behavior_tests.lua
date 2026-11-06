@@ -105,6 +105,7 @@ local function newPlayer(role)
   function ply:IsSpec() return self.spec end
   function ply:GetSubRole() return self.role end
   function ply:EntIndex() return self.index end
+  function ply:Nick() return self.nick or ("Player " .. self.index) end
   function ply:GetShootPos() return vector() end
   function ply:GetAimVector() return vector(1, 0, 0) end
   function ply:WorldSpaceCenter() return self.center end
@@ -116,7 +117,9 @@ local function newPlayer(role)
       math.Clamp(point.z, self.center.z - 36, self.center.z + 36)
     )
   end
-  function ply:KeyDown(key) return key == IN_ATTACK and self.attacking end
+  function ply:KeyDown(key)
+    return key == IN_ATTACK and self.attacking and not self.suppressProcessedAttack
+  end
   function ply:GetActiveWeapon() return self.active or NULL end
   function ply:HasWeapon(class) return self.weapons[class] ~= nil end
   function ply:Give(class)
@@ -157,6 +160,12 @@ local function tick(seconds)
         if request.left == 0 then timers[id] = nil else request.at = now + request.delay end
         request.callback()
       end
+    end
+    for _, ply in ipairs(players) do
+      local held = ply.attacking == true
+      hook.Run("StartCommand", ply, {
+        KeyDown = function(_, key) return key == IN_ATTACK and held end
+      })
     end
     hook.Run("Think")
   end
@@ -233,12 +242,12 @@ test("only Holstered is replaced; ordinary innocent weapons survive", function()
   assert(not IsValid(target:Give(WATCHER_ROLE.STARE_CLASS)))
 end)
 
-test("1.5x faster charging takes about 1.33 seconds and state is private", function()
+test("charging takes two seconds and state is private", function()
   local watcher, target, other = fixture()
-  stare(watcher, target, 1.3)
+  stare(watcher, target, 1.95)
   assert(tracked(watcher) == NULL)
   assertNear(progress(watcher), 0.975)
-  tick(0.05)
+  tick(0.1)
   assert(tracked(watcher) == target and progress(watcher) == 0)
   assert(messages[target] == nil and messages[other] == nil)
   assert(lastTrace.mask == MASK_SHOT and lastTrace.filter == watcher)
@@ -249,7 +258,7 @@ end)
 
 test("missed aim and released attack drain at half the previous speed", function()
   local watcher, target = fixture()
-  stare(watcher, target, 0.8)
+  stare(watcher, target, 1.2)
   assertNear(progress(watcher), 0.6)
   watcher.lookingAt = NULL
   tick(1.2)
@@ -258,106 +267,142 @@ test("missed aim and released attack drain at half the previous speed", function
   tick(1.2)
   assertNear(progress(watcher), 0.2)
   watcher.attacking = true
-  tick(1)
+  tick(1.5)
   assert(tracked(watcher) == NULL)
-  tick(0.2)
+  tick(0.3)
   assert(tracked(watcher) == target)
+end)
+
+test("one held click resumes staring after leaving and returning to a player", function()
+  local watcher, target = fixture()
+  -- Raw commands still hold attack even if the weapon's processed button state
+  -- no longer reports it. Do not release or invoke PrimaryAttack during this test.
+  watcher.attacking, watcher.suppressProcessedAttack = true, true
+  watcher.lookingAt = NULL
+  tick(0.3)
+  watcher.lookingAt = target
+  tick(0.9)
+  assertNear(progress(watcher), 0.45)
+  watcher.lookingAt = NULL
+  tick(0.6)
+  assertNear(progress(watcher), 0.35)
+  watcher.lookingAt = target
+  tick(1.35)
+  assert(tracked(watcher) == target)
+end)
+
+test("a held click restarts after full decay and can acquire a different player", function()
+  local watcher, target, other = fixture()
+  watcher.attacking, watcher.suppressProcessedAttack = true, true
+  watcher.lookingAt = target
+  tick(0.9)
+  watcher.lookingAt = NULL
+  tick(3)
+  assert(progress(watcher) == 0)
+  watcher.lookingAt = target
+  tick(2.8)
+  assert(tracked(watcher) == target)
+  watcher.lookingAt = NULL
+  tick(0.3)
+  watcher.lookingAt = other
+  tick(2.8)
+  assert(tracked(watcher) == other)
 end)
 
 test("blocked traces, spectators and dead targets cannot be acquired", function()
   local watcher, target = fixture()
   local wall = {valid = true, IsPlayer = function() return false end}
-  stare(watcher, wall, 2.2)
+  stare(watcher, wall, 2.8)
   assert(tracked(watcher) == NULL and progress(watcher) == 0)
   target.spec = true
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   assert(tracked(watcher) == NULL)
   target.spec, target.alive = false, false
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   assert(tracked(watcher) == NULL)
 end)
 
 test("aiming a tiny amount beside a visible player acquires them", function()
   local watcher, target = fixture()
   target.center = vector(1000, 18, 0)
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == target)
 end)
 
 test("aim forgiveness works at longer distances", function()
   local watcher, target = fixture()
   target.center = vector(2000, 21, 0)
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == target)
 end)
 
 test("aiming outside the tiny margin does not acquire a player", function()
   local watcher, target = fixture()
   target.center = vector(1000, 20, 0)
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == NULL and progress(watcher) == 0)
 end)
 
 test("aim forgiveness never acquires a player hidden behind cover", function()
   local watcher, target = fixture()
   target.center, target.hidden = vector(1000, 18, 0), true
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == NULL and progress(watcher) == 0)
 end)
 
 test("a visible head allows forgiveness when the body is behind cover", function()
   local watcher, target = fixture()
   target.center, target.centerBlocked = vector(1000, 18, 0), true
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == target)
 end)
 
 test("directly aimed players take priority over nearby candidates", function()
   local watcher, target, other = fixture()
   target.center, other.center = vector(1000, 18, 0), vector(1000, 19, 0)
-  stare(watcher, other, 1.4)
+  stare(watcher, other, 2.8)
   assert(tracked(watcher) == other)
 end)
 
 test("the visible candidate closest to the crosshair is chosen", function()
   local watcher, target, other = fixture()
   target.center, other.center = vector(1000, 18, 0), vector(1000, 17, 0)
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == other)
 end)
 
 test("aim forgiveness excludes spectators, dead players and players behind you", function()
   local watcher, target = fixture()
   target.center, target.spec = vector(1000, 18, 0), true
-  stare(watcher, NULL, 1.4)
+  stare(watcher, NULL, 2.8)
   assert(tracked(watcher) == NULL)
   target.spec, target.alive = false, false
-  tick(1.4)
+  tick(2.8)
   assert(tracked(watcher) == NULL)
   target.alive, target.center = true, vector(-1000, 0, 0)
-  tick(1.4)
+  tick(2.8)
   assert(tracked(watcher) == NULL)
   target.center = vector(33000, 40, 0)
-  tick(1.4)
+  tick(2.8)
   assert(tracked(watcher) == NULL)
 end)
 
 test("progress cannot transfer to a different aimed-at player", function()
   local watcher, target, other = fixture()
-  stare(watcher, target, 1)
-  stare(watcher, other, 0.4)
+  stare(watcher, target, 1.5)
+  stare(watcher, other, 0.6)
   assert(tracked(watcher) == NULL)
   assertNear(progress(watcher), 0.3)
-  tick(1.8)
+  tick(2)
   assert(tracked(watcher) == other)
 end)
 
 test("only a completed second stare replaces the old track", function()
   local watcher, target, other = fixture()
-  stare(watcher, target, 2.2)
-  stare(watcher, other, 1.2)
+  stare(watcher, target, 2.8)
+  stare(watcher, other, 1.8)
   assert(tracked(watcher) == target)
-  tick(0.2)
+  tick(0.4)
   assert(tracked(watcher) == other)
   hook.Run("SetupPlayerVisibility", watcher)
   assert(#pvs == 1 and pvs[1] == other.center)
@@ -367,8 +412,8 @@ end)
 
 test("switching weapons preserves the track and prevents charging", function()
   local watcher, target, other = fixture()
-  stare(watcher, target, 2.2)
-  stare(watcher, other, 0.8)
+  stare(watcher, target, 2.8)
+  stare(watcher, other, 1.2)
   watcher:SelectWeapon("weapon_zm_pistol")
   tick(1.2)
   assert(tracked(watcher) == target)
@@ -386,7 +431,7 @@ test("two Watchers track independently", function()
   tick(0.2)
   second:SelectWeapon(WATCHER_ROLE.STARE_CLASS)
   second.attacking, second.lookingAt = true, other
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   assert(tracked(watcher) == target and tracked(second) == other)
   watcher.alive = false
   hook.Run("PlayerDeath", watcher)
@@ -396,7 +441,7 @@ end)
 for _, event in ipairs({"PlayerDeath", "PlayerSilentDeath", "PlayerDisconnected"}) do
   test(event .. " clears Watcher state and target visibility", function()
     local watcher, target = fixture()
-    stare(watcher, target, 2.2)
+    stare(watcher, target, 2.8)
     hook.Run(event, watcher)
     assert(tracked(watcher) == NULL)
     hook.Run("SetupPlayerVisibility", watcher)
@@ -404,7 +449,7 @@ for _, event in ipairs({"PlayerDeath", "PlayerSilentDeath", "PlayerDisconnected"
   end)
   test(event .. " clears a tracked target without restoring on revival", function()
     local watcher, target = fixture()
-    stare(watcher, target, 2.2)
+    stare(watcher, target, 2.8)
     watcher.attacking = false
     target.alive = false
     hook.Run(event, target)
@@ -417,7 +462,7 @@ end
 
 test("spectating clears tracking even without a death hook", function()
   local watcher, target = fixture()
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   watcher.spec = true
   tick(0.1)
   assert(tracked(watcher) == NULL)
@@ -427,7 +472,7 @@ end)
 
 test("role removal restores Holstered and clears tracking", function()
   local watcher, target = fixture()
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   watcher.role = ROLE_INNOCENT
   hook.Run("TTT2UpdateSubrole", watcher, ROLE_WATCHER, ROLE_INNOCENT)
   ROLE:RemoveRoleLoadout(watcher, true)
@@ -437,7 +482,7 @@ end)
 
 test("TTT2 reassigning the same role does not remove its tool or track", function()
   local watcher, target = fixture()
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   ROLE:GiveRoleLoadout(watcher, true)
   ROLE:RemoveRoleLoadout(watcher, true)
   tick(0.2)
@@ -447,8 +492,8 @@ end)
 for _, event in ipairs({"TTTEndRound", "TTTPrepareRound"}) do
   test(event .. " clears completed and partial tracking", function()
     local watcher, target, other = fixture()
-    stare(watcher, target, 2.2)
-    stare(watcher, other, 0.8)
+    stare(watcher, target, 2.8)
+    stare(watcher, other, 1.2)
     roundState = event == "TTTEndRound" and ROUND_POST or ROUND_PREP
     hook.Run(event)
     assert(tracked(watcher) == NULL and progress(watcher) == 0)
@@ -483,7 +528,7 @@ end)
 
 test("respawning starts with no previous track", function()
   local watcher, target = fixture()
-  stare(watcher, target, 2.2)
+  stare(watcher, target, 2.8)
   watcher.attacking = false
   hook.Run("PlayerSpawn", watcher)
   tick(0.2)
@@ -530,9 +575,10 @@ end)
 
 test("the stare HUD keeps progress and hides idle and tracking messages", function()
   local target = players[2]
+  target.nick = "Alex"
   deliver(nil, target, 0.5)
   SWEP:DrawHUD()
-  assert(#drawings == 3 and drawings[3][1] == "Staring 50%")
+  assert(#drawings == 3 and drawings[3][1] == "Staring at Alex 50%")
   drawings = {}
   deliver(target)
   SWEP:DrawHUD()

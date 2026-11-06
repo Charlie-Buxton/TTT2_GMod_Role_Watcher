@@ -3,7 +3,7 @@ if SERVER then
 end
 
 function ROLE:PreInitialize()
-  self.color = Color(95, 175, 160, 255)
+  self.color = Color(95, 180, 140, 255)
   self.abbr = "wtch"
   self.icon = "vgui/ttt/dynamic/roles/icon_inno"
   self.defaultTeam = TEAM_INNOCENT
